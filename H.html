@@ -1,0 +1,456 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { 
+  Plus, Trash2, DollarSign, PieChart, Wallet, CreditCard, 
+  TrendingUp, Save, ArrowDown, ArrowUp, Activity, Heart, 
+  Smartphone, Coffee, ShieldCheck, Loader2, Save as SaveIcon,
+  CheckCircle2, CloudOff
+} from 'lucide-react';
+import { initializeApp } from "firebase/app";
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
+import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
+
+// --- إعدادات Firebase ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- دوال المساعدة (خارج المكون الرئيسي) ---
+
+// دالة لتأخير الحفظ (Debounce) لتقليل الكتابة المتكررة على قاعدة البيانات
+const debounce = (func, wait) => {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+};
+
+const handleAmountChange = (list, setList, id, val) => {
+  const newList = list.map(item => item.id === id ? { ...item, amount: val } : item);
+  setList(newList);
+};
+
+const handleNameChange = (list, setList, id, val) => {
+  const newList = list.map(item => item.id === id ? { ...item, name: val } : item);
+  setList(newList);
+};
+
+const addItem = (list, setList) => {
+  const newId = list.length > 0 ? Math.max(...list.map(i => i.id)) + 1 : 1;
+  setList([...list, { id: newId, name: '', amount: 0 }]);
+};
+
+const removeItem = (list, setList, id) => {
+  setList(list.filter(item => item.id !== id));
+};
+
+// --- المكونات الفرعية (UI Components) ---
+
+const StatCard = ({ title, amount, icon: Icon, type, subtext }) => {
+  let gradient = "";
+  let iconColor = "";
+  
+  if (type === 'income') { 
+    gradient = "from-emerald-50 to-teal-50 border-emerald-100"; 
+    iconColor = "text-emerald-600"; 
+  } else if (type === 'expense') { 
+    gradient = "from-rose-50 to-pink-50 border-rose-100"; 
+    iconColor = "text-rose-600"; 
+  } else { 
+    gradient = "from-indigo-50 to-blue-50 border-indigo-100"; 
+    iconColor = "text-indigo-600"; 
+  }
+
+  return (
+    <div className={`relative overflow-hidden rounded-3xl p-5 border ${gradient} bg-gradient-to-br shadow-sm hover:shadow-lg transition-all duration-300 transform hover:-translate-y-1`}>
+      <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-white opacity-40 rounded-full blur-xl"></div>
+      
+      <div className="flex justify-between items-start relative z-10">
+        <div>
+          <p className="text-slate-500 text-xs font-bold mb-1 uppercase tracking-wider opacity-80">{title}</p>
+          <h3 className="text-2xl sm:text-3xl font-extrabold text-slate-800 tracking-tight">
+            {amount.toLocaleString()} 
+            <span className="text-xs sm:text-sm font-medium text-slate-400 mr-1">ر.س</span>
+          </h3>
+          {subtext && <p className="text-xs text-slate-400 mt-2 font-medium">{subtext}</p>}
+        </div>
+        <div className={`p-3 rounded-2xl bg-white/80 backdrop-blur shadow-sm ${iconColor}`}>
+          <Icon size={24} strokeWidth={2.5} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const InputRow = ({ list, setList, item }) => (
+  <div className="group flex flex-col sm:flex-row gap-2 sm:gap-3 mb-3 items-stretch sm:items-center p-3 rounded-2xl bg-white border border-slate-100 hover:border-indigo-300 hover:shadow-md transition-all duration-200">
+    <div className="flex-grow relative">
+      <input
+        type="text"
+        value={item.name}
+        onChange={(e) => handleNameChange(list, setList, item.id, e.target.value)}
+        className="w-full bg-transparent p-1 text-slate-700 placeholder-slate-400 focus:outline-none font-bold text-right transition-colors"
+        placeholder="اسم البند..."
+      />
+    </div>
+    
+    <div className="flex gap-2 items-center justify-between sm:justify-end border-t sm:border-t-0 border-slate-100 pt-2 sm:pt-0 mt-1 sm:mt-0">
+      <div className="relative w-full sm:w-32">
+        <input
+          type="number"
+          value={item.amount === 0 ? '' : item.amount}
+          onChange={(e) => handleAmountChange(list, setList, item.id, e.target.value)}
+          className="w-full bg-slate-50 p-2 pr-8 rounded-xl text-left font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500/20 focus:bg-white focus:outline-none transition-all border border-transparent focus:border-indigo-200"
+          placeholder="0"
+        />
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 font-bold">SR</span>
+      </div>
+      
+      <button 
+        onClick={() => removeItem(list, setList, item.id)}
+        className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all"
+        title="حذف"
+      >
+        <Trash2 size={18} />
+      </button>
+    </div>
+  </div>
+);
+
+const Section = ({ title, subtitle, icon: Icon, total, list, setList, colorTheme }) => {
+  const themes = {
+    emerald: "bg-emerald-600 text-emerald-600 border-emerald-200 bg-emerald-50",
+    indigo: "bg-indigo-600 text-indigo-600 border-indigo-200 bg-indigo-50",
+    rose: "bg-rose-600 text-rose-600 border-rose-200 bg-rose-50",
+    amber: "bg-amber-500 text-amber-600 border-amber-200 bg-amber-50",
+    violet: "bg-violet-600 text-violet-600 border-violet-200 bg-violet-50",
+    cyan: "bg-cyan-600 text-cyan-600 border-cyan-200 bg-cyan-50",
+  };
+  
+  const currentTheme = themes[colorTheme] || themes.indigo;
+  const [bgHeader, textHeader, border, bgIcon] = currentTheme.split(" ");
+
+  return (
+    <div className="break-inside-avoid mb-6 bg-white rounded-3xl shadow-[0_2px_15px_-3px_rgba(0,0,0,0.07),0_10px_20px_-2px_rgba(0,0,0,0.04)] border border-slate-100 overflow-hidden hover:shadow-xl transition-shadow duration-300 flex flex-col">
+      <div className="p-5 border-b border-slate-50 flex justify-between items-center bg-gradient-to-l from-slate-50/50 to-white">
+        <div className="flex items-center gap-3">
+          <div className={`p-3 rounded-2xl ${bgIcon} bg-opacity-15`}>
+            <Icon size={22} className={textHeader} strokeWidth={2.5} />
+          </div>
+          <div>
+            <h3 className="font-extrabold text-lg text-slate-800 leading-tight">{title}</h3>
+            <p className="text-xs text-slate-400 font-medium">{subtitle}</p>
+          </div>
+        </div>
+        <div className="text-right">
+          <span className={`font-bold text-xl ${textHeader}`}>
+            {total.toLocaleString()}
+          </span>
+        </div>
+      </div>
+      
+      <div className="p-4 flex-grow bg-slate-50/50">
+        {list.length === 0 && (
+          <div className="text-center py-6 text-slate-400 text-sm italic opacity-60 font-medium">
+            لا توجد بنود مضافة
+          </div>
+        )}
+        {list.map(item => (
+          <InputRow key={item.id} list={list} setList={setList} item={item} />
+        ))}
+      </div>
+      
+      <div className="p-3 bg-white border-t border-slate-100">
+        <button 
+          onClick={() => addItem(list, setList)} 
+          className={`w-full py-3 rounded-2xl border border-dashed ${border} ${textHeader} bg-white hover:${bgIcon} hover:bg-opacity-10 transition-all flex items-center justify-center gap-2 text-sm font-extrabold`}
+        >
+          <Plus size={18} strokeWidth={3} /> إضافة جديد
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const App = () => {
+  // --- State Management ---
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saveStatus, setSaveStatus] = useState('saved'); // saved, saving, error
+
+  // Initial Data Templates
+  const initialData = {
+    income: [{ id: 1, name: 'الراتب الشهري', amount: 0 }],
+    fixedExpenses: [{ id: 1, name: 'إيجار المنزل', amount: 0 }, { id: 2, name: 'كهرباء ومياه', amount: 0 }],
+    subscriptions: [{ id: 1, name: 'باقة الجوال / النت', amount: 0 }],
+    variableExpenses: [{ id: 1, name: 'مقاضي وسوبرماركت', amount: 0 }, { id: 2, name: 'بنزين ومواصلات', amount: 0 }],
+    debts: [{ id: 1, name: 'قسط بنكي', amount: 0 }],
+    charity: [{ id: 1, name: 'صدقة شهرية', amount: 0 }],
+    savings: [{ id: 1, name: 'ادخار الطوارئ', amount: 0 }]
+  };
+
+  const [income, setIncome] = useState(initialData.income);
+  const [fixedExpenses, setFixedExpenses] = useState(initialData.fixedExpenses);
+  const [subscriptions, setSubscriptions] = useState(initialData.subscriptions);
+  const [variableExpenses, setVariableExpenses] = useState(initialData.variableExpenses);
+  const [debts, setDebts] = useState(initialData.debts);
+  const [charity, setCharity] = useState(initialData.charity);
+  const [savings, setSavings] = useState(initialData.savings);
+
+  // --- Firebase Auth & Sync ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth error:", error);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'budget');
+    
+    // Listen for real-time updates
+    const unsubscribeSnapshot = onSnapshot(docRef, (docSnap) => {
+      setLoading(false);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        // Update local state if data exists, otherwise keep defaults (handled by initial render)
+        if (data.income) setIncome(data.income);
+        if (data.fixedExpenses) setFixedExpenses(data.fixedExpenses);
+        if (data.subscriptions) setSubscriptions(data.subscriptions);
+        if (data.variableExpenses) setVariableExpenses(data.variableExpenses);
+        if (data.debts) setDebts(data.debts);
+        if (data.charity) setCharity(data.charity);
+        if (data.savings) setSavings(data.savings);
+      } else {
+        // Create document if it doesn't exist
+        setDoc(docRef, initialData, { merge: true });
+      }
+    }, (error) => {
+      console.error("Sync error:", error);
+      setLoading(false);
+    });
+
+    return () => unsubscribeSnapshot();
+  }, [user]);
+
+  // --- Database Save Logic ---
+  const saveToDb = async (field, newData) => {
+    if (!user) return;
+    setSaveStatus('saving');
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'budget');
+      await setDoc(docRef, { [field]: newData }, { merge: true });
+      setSaveStatus('saved');
+    } catch (error) {
+      console.error("Save error:", error);
+      setSaveStatus('error');
+    }
+  };
+
+  // Debounced save for frequent updates (like typing names)
+  // We use a ref to keep the debounce function stable
+  const debouncedSaveRef = useRef(debounce((field, newData) => saveToDb(field, newData), 1000));
+
+  // --- Wrappers for State Setters ---
+  // These wrappers update the UI immediately AND trigger the DB save
+  const updateIncome = (newData) => { setIncome(newData); debouncedSaveRef.current('income', newData); };
+  const updateFixed = (newData) => { setFixedExpenses(newData); debouncedSaveRef.current('fixedExpenses', newData); };
+  const updateSubs = (newData) => { setSubscriptions(newData); debouncedSaveRef.current('subscriptions', newData); };
+  const updateVariable = (newData) => { setVariableExpenses(newData); debouncedSaveRef.current('variableExpenses', newData); };
+  const updateDebts = (newData) => { setDebts(newData); debouncedSaveRef.current('debts', newData); };
+  const updateCharity = (newData) => { setCharity(newData); debouncedSaveRef.current('charity', newData); };
+  const updateSavings = (newData) => { setSavings(newData); debouncedSaveRef.current('savings', newData); };
+
+  // --- Calculations ---
+  const calc = (items) => items.reduce((acc, item) => acc + (parseFloat(item.amount) || 0), 0);
+
+  const totalIncome = calc(income);
+  const tFixed = calc(fixedExpenses);
+  const tSubs = calc(subscriptions);
+  const tVariable = calc(variableExpenses);
+  const tDebts = calc(debts);
+  const tCharity = calc(charity);
+  const tSavings = calc(savings);
+
+  const totalExpenses = tFixed + tSubs + tVariable + tDebts + tCharity;
+  const balance = totalIncome - totalExpenses - tSavings;
+  const dailyBudget = balance > 0 ? (balance / 30) : 0;
+
+  const needs = tFixed + tDebts + tSubs + (tVariable * 0.5);
+  const wants = (tVariable * 0.5);
+  const givingSavings = tSavings + tCharity;
+
+  const getPercent = (val) => totalIncome > 0 ? ((val / totalIncome) * 100).toFixed(1) : 0;
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F2F4F7] flex-col gap-4">
+        <Loader2 className="animate-spin text-indigo-600" size={48} />
+        <p className="text-slate-500 font-bold">جاري استرجاع بياناتك...</p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap');
+        body { font-family: 'Almarai', sans-serif !important; }
+      `}</style>
+      
+      <div className="min-h-screen bg-[#F2F4F7] text-slate-800 pb-20 selection:bg-indigo-100" dir="rtl">
+        
+        {/* Header Area */}
+        <div className="bg-[#1e1b4b] text-white pb-32 rounded-b-[3rem] shadow-2xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500 rounded-full mix-blend-overlay filter blur-3xl opacity-20 -mr-20 -mt-20 animate-pulse"></div>
+          <div className="absolute bottom-0 left-0 w-72 h-72 bg-rose-500 rounded-full mix-blend-overlay filter blur-3xl opacity-20 -ml-10 -mb-10"></div>
+          
+          <div className="max-w-7xl mx-auto px-6 pt-12 relative z-10">
+            <div className="flex flex-col md:flex-row justify-between items-center gap-6 mb-8">
+              <div className="text-center md:text-right">
+                <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight">المدير المالي</h1>
+                <p className="text-slate-300 mt-3 text-lg font-light opacity-90">بياناتك محفوظة وآمنة في السحابة ☁️</p>
+              </div>
+              <div className="flex gap-3">
+                 <div className="bg-white/10 backdrop-blur-xl px-5 py-2.5 rounded-full border border-white/20 flex items-center gap-2 shadow-lg">
+                    {saveStatus === 'saving' && <Loader2 className="animate-spin text-white" size={18} />}
+                    {saveStatus === 'saved' && <CheckCircle2 className="text-emerald-400" size={18} />}
+                    {saveStatus === 'error' && <CloudOff className="text-rose-400" size={18} />}
+                    <span className="text-sm font-bold text-white/95">
+                      {saveStatus === 'saving' ? 'جاري الحفظ...' : saveStatus === 'saved' ? 'تم الحفظ' : 'خطأ في الاتصال'}
+                    </span>
+                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 -mt-24 relative z-20 space-y-8">
+          
+          {/* Top Stats - Grid Layout */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <StatCard title="الدخل الشهري" amount={totalIncome} icon={ArrowUp} type="income" />
+            <StatCard title="إجمالي المصروفات" amount={totalExpenses} icon={ArrowDown} type="expense" />
+            <StatCard title="الادخار والزكاة" amount={tSavings + tCharity} icon={Heart} type="saving" />
+            
+            <div className={`relative overflow-hidden rounded-3xl p-6 shadow-xl text-white flex flex-col justify-between transform transition-transform hover:-translate-y-1
+              ${balance >= 0 ? 'bg-gradient-to-br from-emerald-500 to-teal-700 shadow-emerald-900/20' : 'bg-gradient-to-br from-rose-500 to-red-700 shadow-rose-900/20'}`}>
+               <div className="flex justify-between items-start z-10 relative">
+                 <div>
+                    <p className="text-white/90 text-xs font-extrabold uppercase tracking-wider mb-2">المتبقي (الصافي)</p>
+                    <h3 className="text-3xl font-extrabold">{balance.toLocaleString()}</h3>
+                 </div>
+                 <Wallet className="text-white/90" size={28} />
+               </div>
+               {balance > 0 && (
+                 <div className="mt-5 pt-4 border-t border-white/20 z-10 relative">
+                   <p className="text-xs text-emerald-100 font-medium mb-1">المصروف اليومي المقترح:</p>
+                   <p className="text-xl font-bold">{dailyBudget.toFixed(0)} <span className="text-xs font-normal opacity-80">ر.س / يوم</span></p>
+                 </div>
+               )}
+            </div>
+          </div>
+
+          {/* Analysis Bar - Full Width */}
+          <div className="bg-white p-6 md:p-8 rounded-[2rem] shadow-sm border border-slate-100">
+            <h3 className="font-extrabold text-slate-800 mb-6 flex items-center gap-3 text-lg">
+              <Activity className="text-indigo-500" size={24} />
+              توزيع الراتب (قاعدة 50/30/20)
+            </h3>
+            
+            <div className="flex h-8 bg-slate-100 rounded-full overflow-hidden mb-5 shadow-inner p-1">
+              <div className="h-full rounded-full bg-indigo-500 relative group transition-all duration-1000" style={{ width: `${Math.min(getPercent(needs), 100)}%` }}></div>
+              <div className="h-full rounded-full bg-amber-400 relative group transition-all duration-1000 mx-0.5" style={{ width: `${Math.min(getPercent(wants), 100)}%` }}></div>
+              <div className="h-full rounded-full bg-emerald-500 relative group transition-all duration-1000" style={{ width: `${Math.min(getPercent(givingSavings), 100)}%` }}></div>
+            </div>
+
+            <div className="flex flex-wrap gap-6 text-sm text-slate-600 justify-between font-medium px-1">
+               <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-indigo-500 shadow-sm"></div>الاحتياجات ({getPercent(needs)}%)</div>
+               <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-amber-400 shadow-sm"></div>الرغبات ({getPercent(wants)}%)</div>
+               <div className="flex items-center gap-2"><div className="w-3 h-3 rounded-full bg-emerald-500 shadow-sm"></div>المستقبل ({getPercent(givingSavings)}%)</div>
+            </div>
+          </div>
+
+          {/* Masonry Layout for Sections - No Gaps */}
+          <div className="columns-1 md:columns-2 lg:columns-3 gap-6 space-y-6">
+            
+            {/* Income Group */}
+            <Section 
+              title="مصادر الدخل" subtitle="الراتب والأعمال الحرة"
+              icon={TrendingUp} total={totalIncome} 
+              list={income} setList={updateIncome} colorTheme="emerald"
+            />
+            
+            {/* Future Group */}
+             <Section 
+              title="الادخار والاستثمار" subtitle="تأمين المستقبل"
+              icon={Save} total={tSavings} 
+              list={savings} setList={updateSavings} colorTheme="teal"
+            />
+
+            {/* Fixed Group */}
+            <Section 
+              title="الثوابت والفواتير" subtitle="التزامات أساسية"
+              icon={Wallet} total={tFixed} 
+              list={fixedExpenses} setList={updateFixed} colorTheme="indigo"
+            />
+            
+            {/* Debts Group */}
+            <Section 
+              title="الديون والأقساط" subtitle="قروض وبطاقات"
+              icon={CreditCard} total={tDebts} 
+              list={debts} setList={updateDebts} colorTheme="rose"
+            />
+            
+            {/* Subscription Group */}
+            <Section 
+              title="الاشتراكات الشهرية" subtitle="اتصالات وتطبيقات"
+              icon={Smartphone} total={tSubs} 
+              list={subscriptions} setList={updateSubs} colorTheme="violet"
+            />
+
+            {/* Lifestyle Group */}
+            <Section 
+              title="مصاريف المعيشة" subtitle="استهلاك يومي"
+              icon={Coffee} total={tVariable} 
+              list={variableExpenses} setList={updateVariable} colorTheme="amber"
+            />
+            
+            {/* Charity Group */}
+             <Section 
+              title="الصدقات والزكاة" subtitle="بركة المال"
+              icon={Heart} total={tCharity} 
+              list={charity} setList={updateCharity} colorTheme="cyan"
+            />
+
+          </div>
+
+          <div className="text-center py-12">
+            <p className="text-slate-400 text-sm font-bold opacity-60">تتم المزامنة تلقائياً مع السحابة © 2024</p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+export default App;
+
